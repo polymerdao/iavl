@@ -83,15 +83,19 @@ type nodeDB struct {
 	fastNodeCache  cache.Cache      // Cache for nodes in the fast index that represents only key-value pairs at the latest version.
 }
 
-func newNodeDB(db dbm.DB, cacheSize int, opts *Options) *nodeDB {
+func newNodeDB(db dbm.DB, cacheSize int, opts *Options, noStoreVersion bool) *nodeDB {
 	if opts == nil {
 		o := DefaultOptions()
 		opts = &o
 	}
 
-	storeVersion, err := db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
-
-	if err != nil || storeVersion == nil {
+	var storeVersion []byte
+	if !noStoreVersion {
+		storeVersion, err := db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
+		if err != nil || storeVersion == nil {
+			storeVersion = []byte(defaultStorageVersionValue)
+		}
+	} else {
 		storeVersion = []byte(defaultStorageVersionValue)
 	}
 

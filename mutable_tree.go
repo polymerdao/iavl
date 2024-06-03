@@ -39,18 +39,20 @@ type MutableTree struct {
 	unsavedFastNodeRemovals  map[string]interface{}    // FastNodes that have not yet been removed from disk
 	ndb                      *nodeDB
 	skipFastStorageUpgrade   bool // If true, the tree will work like no fast storage and always not upgrade fast storage
+	rootHash                 []byte
 
 	mtx sync.Mutex
 }
 
 // NewMutableTree returns a new tree with the specified cache size and datastore.
-func NewMutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool) (*MutableTree, error) {
-	return NewMutableTreeWithOpts(db, cacheSize, nil, skipFastStorageUpgrade)
+func NewMutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool, rootHash []byte, noStoreVersion bool) (*MutableTree, error) {
+	return NewMutableTreeWithOpts(db, cacheSize, nil, skipFastStorageUpgrade, rootHash, noStoreVersion)
 }
 
 // NewMutableTreeWithOpts returns a new tree with the specified options.
-func NewMutableTreeWithOpts(db dbm.DB, cacheSize int, opts *Options, skipFastStorageUpgrade bool) (*MutableTree, error) {
-	ndb := newNodeDB(db, cacheSize, opts)
+func NewMutableTreeWithOpts(db dbm.DB, cacheSize int, opts *Options,
+	skipFastStorageUpgrade bool, rootHash []byte, noStoreVersion bool) (*MutableTree, error) {
+	ndb := newNodeDB(db, cacheSize, opts, noStoreVersion)
 	head := &ImmutableTree{ndb: ndb, skipFastStorageUpgrade: skipFastStorageUpgrade}
 
 	return &MutableTree{
@@ -63,6 +65,7 @@ func NewMutableTreeWithOpts(db dbm.DB, cacheSize int, opts *Options, skipFastSto
 		unsavedFastNodeRemovals:  make(map[string]interface{}),
 		ndb:                      ndb,
 		skipFastStorageUpgrade:   skipFastStorageUpgrade,
+		rootHash:                 rootHash,
 	}, nil
 }
 
@@ -148,7 +151,15 @@ func (tree *MutableTree) Set(key, value []byte) (updated bool, err error) {
 // The returned value must not be modified, since it may point to data stored within IAVL.
 func (tree *MutableTree) Get(key []byte) ([]byte, error) {
 	if tree.root == nil {
-		return nil, nil
+		if tree.rootHash != nil {
+			root, err := tree.ndb.GetNode(tree.rootHash)
+			if err != nil {
+				return nil, err
+			}
+			tree.root = root
+		} else {
+			return nil, nil
+		}
 	}
 
 	if !tree.skipFastStorageUpgrade {
@@ -622,6 +633,45 @@ func (tree *MutableTree) LoadVersion(targetVersion int64) (int64, error) {
 	return latestVersion, nil
 }
 
+// LoadVersionByRootHash loads a tree using the provided version and roothash
+func (tree *MutableTree) LoadVersionByRootHash(version int64, rootHash []byte) error {
+	if len(rootHash) == 0 {
+		return errors.New("LoadVersionByRootHash must be provided a non-empty rootHash argument")
+	}
+
+	tree.mtx.Lock()
+	defer tree.mtx.Unlock()
+
+	t := &ImmutableTree{
+		ndb:                    tree.ndb,
+		version:                version,
+		skipFastStorageUpgrade: tree.skipFastStorageUpgrade,
+	}
+
+	if len(rootHash) != 0 {
+		var err error
+		t.root, err = tree.ndb.GetNode(rootHash)
+		if err != nil {
+			return err
+		}
+	}
+
+	tree.orphans = map[string]int64{}
+	tree.ImmutableTree = t
+	tree.lastSaved = t.clone()
+	tree.allRootLoaded = true
+	tree.rootHash = rootHash
+
+	if !tree.skipFastStorageUpgrade {
+		// Attempt to upgrade
+		if _, err := tree.enableFastStorageAndCommitIfNotEnabled(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // loadVersionForOverwriting attempts to load a tree at a previously committed
 // version, or the latest version below it. Any versions greater than targetVersion will be deleted.
 func (tree *MutableTree) loadVersionForOverwriting(targetVersion int64, lazy bool) (int64, error) {
@@ -770,9 +820,13 @@ func (tree *MutableTree) enableFastStorageAndCommit() error {
 // GetImmutable loads an ImmutableTree at a given version for querying. The returned tree is
 // safe for concurrent access, provided the version is not deleted, e.g. via `DeleteVersion()`.
 func (tree *MutableTree) GetImmutable(version int64) (*ImmutableTree, error) {
-	rootHash, err := tree.ndb.getRoot(version)
-	if err != nil {
-		return nil, err
+	rootHash := tree.rootHash
+	var err error
+	if rootHash != nil {
+		rootHash, err = tree.ndb.getRoot(version)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if rootHash == nil {
 		return nil, ErrVersionDoesNotExist
@@ -866,9 +920,13 @@ func (tree *MutableTree) SaveVersion() ([]byte, int64, error) {
 	if tree.VersionExists(version) {
 		// If the version already exists, return an error as we're attempting to overwrite.
 		// However, the same hash means idempotent (i.e. no-op).
-		existingHash, err := tree.ndb.getRoot(version)
-		if err != nil {
-			return nil, version, err
+		existingHash := tree.rootHash
+		var err error
+		if existingHash == nil {
+			existingHash, err = tree.ndb.getRoot(version)
+			if err != nil {
+				return nil, version, err
+			}
 		}
 
 		// If the existing root hash is empty (because the tree is empty), then we need to
@@ -944,7 +1002,7 @@ func (tree *MutableTree) SaveVersion() ([]byte, int64, error) {
 	if err != nil {
 		return nil, version, err
 	}
-
+	tree.rootHash = hash
 	return hash, version, nil
 }
 
