@@ -91,7 +91,8 @@ func newNodeDB(db dbm.DB, cacheSize int, opts *Options, noStoreVersion bool) *no
 
 	var storeVersion []byte
 	if !noStoreVersion {
-		storeVersion, err := db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
+		var err error
+		storeVersion, err = db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
 		if err != nil || storeVersion == nil {
 			storeVersion = []byte(defaultStorageVersionValue)
 		}

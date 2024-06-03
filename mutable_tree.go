@@ -820,13 +820,9 @@ func (tree *MutableTree) enableFastStorageAndCommit() error {
 // GetImmutable loads an ImmutableTree at a given version for querying. The returned tree is
 // safe for concurrent access, provided the version is not deleted, e.g. via `DeleteVersion()`.
 func (tree *MutableTree) GetImmutable(version int64) (*ImmutableTree, error) {
-	rootHash := tree.rootHash
-	var err error
-	if rootHash != nil {
-		rootHash, err = tree.ndb.getRoot(version)
-		if err != nil {
-			return nil, err
-		}
+	rootHash, err := tree.ndb.getRoot(version)
+	if err != nil {
+		return nil, err
 	}
 	if rootHash == nil {
 		return nil, ErrVersionDoesNotExist
@@ -920,13 +916,9 @@ func (tree *MutableTree) SaveVersion() ([]byte, int64, error) {
 	if tree.VersionExists(version) {
 		// If the version already exists, return an error as we're attempting to overwrite.
 		// However, the same hash means idempotent (i.e. no-op).
-		existingHash := tree.rootHash
-		var err error
-		if existingHash == nil {
-			existingHash, err = tree.ndb.getRoot(version)
-			if err != nil {
-				return nil, version, err
-			}
+		existingHash, err := tree.ndb.getRoot(version)
+		if err != nil {
+			return nil, version, err
 		}
 
 		// If the existing root hash is empty (because the tree is empty), then we need to
