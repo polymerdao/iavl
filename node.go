@@ -77,12 +77,13 @@ type Node struct {
 var _ cache.Node = (*Node)(nil)
 
 // NewNode returns a new node from a key, value and version.
-func NewNode(key []byte, value []byte) *Node {
+func NewNode(key []byte, value []byte, useLegacy bool) *Node {
 	return &Node{
 		key:           key,
 		value:         value,
 		subtreeHeight: 0,
 		size:          1,
+		isLegacy:      useLegacy,
 	}
 }
 
@@ -243,11 +244,9 @@ func MakeLegacyNode(hash, buf []byte) (*Node, error) {
 		nodeKey:       &NodeKey{version: ver},
 		key:           key,
 		hash:          hash,
-		isLegacy:      true,
 	}
 
 	// Read node body.
-
 	if node.isLeaf() {
 		val, _, err := encoding.DecodeBytes(buf)
 		if err != nil {
@@ -612,6 +611,9 @@ func (node *Node) writeBytes(w io.Writer) error {
 		if node.leftNodeKey == nil {
 			return ErrLeftNodeKeyEmpty
 		}
+		if node.rightNodeKey == nil {
+			return ErrRightNodeKeyEmpty
+		}
 		// check if children NodeKeys are legacy mode
 		if len(node.leftNodeKey) == hashSize {
 			mode += ModeLegacyLeftNode
@@ -657,6 +659,54 @@ func (node *Node) writeBytes(w io.Writer) error {
 			if err != nil {
 				return fmt.Errorf("writing the nonce of right node key, %w", err)
 			}
+		}
+	}
+	return nil
+}
+
+func (node *Node) writeLegacyBytes(w io.Writer) error {
+	if node == nil {
+		return errors.New("cannot write nil node")
+	}
+	err := encoding.EncodeVarint(w, int64(node.subtreeHeight))
+	if err != nil {
+		return fmt.Errorf("writing height, %w", err)
+	}
+	err = encoding.EncodeVarint(w, node.size)
+	if err != nil {
+		return fmt.Errorf("writing size, %w", err)
+	}
+	err = encoding.EncodeVarint(w, node.nodeKey.version)
+	if err != nil {
+		return fmt.Errorf("writing version, %w", err)
+	}
+
+	// Unlike writeHashBytes, key is written for inner nodes.
+	err = encoding.EncodeBytes(w, node.key)
+	if err != nil {
+		return fmt.Errorf("writing key, %w", err)
+	}
+
+	if node.isLeaf() {
+		err = encoding.EncodeBytes(w, node.value)
+		if err != nil {
+			return fmt.Errorf("writing value, %w", err)
+		}
+	} else {
+		if len(node.leftNodeKey) != hashSize {
+			return errors.New("node provided to writeLegacyBytes does not have a hash for leftNodeKey")
+		}
+		err = encoding.EncodeBytes(w, node.leftNodeKey)
+		if err != nil {
+			return fmt.Errorf("writing left hash, %w", err)
+		}
+
+		if len(node.leftNodeKey) != 32 {
+			return errors.New("node provided to writeLegacyBytes does not have a hash for rightNodeKey")
+		}
+		err = encoding.EncodeBytes(w, node.rightNodeKey)
+		if err != nil {
+			return fmt.Errorf("writing right hash, %w", err)
 		}
 	}
 	return nil

@@ -90,10 +90,11 @@ type nodeDB struct {
 	legacyLatestVersion int64            // Latest version of nodeDB in legacy format.
 	nodeCache           cache.Cache      // Cache for nodes in the regular tree that consists of key-value pairs at any version.
 	fastNodeCache       cache.Cache      // Cache for nodes in the fast index that represents only key-value pairs at the latest version.
+	useLegacyFormat     bool
 }
 
 func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg log.Logger) *nodeDB {
-	storeVersion, err := db.Get(metadataKeyFormat.Key([]byte(storageVersionKey)))
+	storeVersion, err := db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
 
 	if err != nil || storeVersion == nil {
 		storeVersion = []byte(defaultStorageVersionValue)
@@ -111,6 +112,34 @@ func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg log.Logger) *nodeDB {
 		fastNodeCache:       cache.New(fastNodeCacheSize),
 		versionReaders:      make(map[int64]uint32, 8),
 		storageVersion:      string(storeVersion),
+	}
+}
+
+func newLegacyNodeDB(db dbm.DB, cacheSize int, opts Options, noStoreVersion bool, lg log.Logger) *nodeDB {
+	var storeVersion []byte
+	if noStoreVersion {
+		storeVersion = []byte(defaultStorageVersionValue)
+	} else {
+		var err error
+		storeVersion, err = db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
+		if err != nil || storeVersion == nil {
+			storeVersion = []byte(defaultStorageVersionValue)
+		}
+	}
+
+	return &nodeDB{
+		logger:              lg,
+		db:                  db,
+		batch:               NewBatchWithFlusher(db, opts.FlushThreshold),
+		opts:                opts,
+		firstVersion:        0,
+		latestVersion:       0, // initially invalid
+		legacyLatestVersion: 0,
+		nodeCache:           cache.New(cacheSize),
+		fastNodeCache:       cache.New(fastNodeCacheSize),
+		versionReaders:      make(map[int64]uint32, 8),
+		storageVersion:      string(storeVersion),
+		useLegacyFormat:     true,
 	}
 }
 
@@ -135,9 +164,9 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	ndb.opts.Stat.IncCacheMissCnt()
 
 	// Doesn't exist, load.
-	isLegcyNode := len(nk) == hashSize
+	isLegacyNode := len(nk) == hashSize
 	var nodeKey []byte
-	if isLegcyNode {
+	if isLegacyNode {
 		nodeKey = ndb.legacyNodeKey(nk)
 	} else {
 		nodeKey = ndb.nodeKey(nk)
@@ -151,11 +180,12 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	}
 
 	var node *Node
-	if isLegcyNode {
+	if isLegacyNode {
 		node, err = MakeLegacyNode(nk, buf)
 		if err != nil {
 			return nil, fmt.Errorf("error reading Legacy Node. bytes: %x, error: %v", buf, err)
 		}
+		node.isLegacy = ndb.useLegacyFormat
 	} else {
 		node, err = MakeNode(nk, buf)
 		if err != nil {
@@ -209,7 +239,7 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
 
-	if node.nodeKey == nil {
+	if node.nodeKey == nil || (ndb.useLegacyFormat && node.hash == nil) {
 		return ErrNodeMissingNodeKey
 	}
 
@@ -217,12 +247,21 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 	var buf bytes.Buffer
 	buf.Grow(node.encodedSize())
 
-	if err := node.writeBytes(&buf); err != nil {
-		return err
-	}
-
-	if err := ndb.batch.Set(ndb.nodeKey(node.GetKey()), buf.Bytes()); err != nil {
-		return err
+	nk := node.GetKey()
+	if len(nk) == hashSize {
+		if err := node.writeLegacyBytes(&buf); err != nil {
+			return err
+		}
+		if err := ndb.batch.Set(ndb.legacyNodeKey(nk), buf.Bytes()); err != nil {
+			return err
+		}
+	} else {
+		if err := node.writeBytes(&buf); err != nil {
+			return err
+		}
+		if err := ndb.batch.Set(ndb.nodeKey(nk), buf.Bytes()); err != nil {
+			return err
+		}
 	}
 
 	ndb.logger.Debug("BATCH SAVE", "node", node)
@@ -328,6 +367,9 @@ func (ndb *nodeDB) saveFastNodeUnlocked(node *fastnode.Node, shouldAddToCache bo
 
 // Has checks if a node key exists in the database.
 func (ndb *nodeDB) Has(nk []byte) (bool, error) {
+	if len(nk) == hashSize {
+		return ndb.db.Has(ndb.legacyNodeKey(nk))
+	}
 	return ndb.db.Has(ndb.nodeKey(nk))
 }
 
@@ -826,6 +868,13 @@ func (ndb *nodeDB) SaveRoot(version int64, nk *NodeKey) error {
 	defer ndb.mtx.Unlock()
 	ndb.logger.Debug("SaveRoot", "version", version, "nodeKey", nk)
 	return ndb.batch.Set(nodeKeyFormat.Key(GetRootKey(version)), nodeKeyFormat.Key(nk.GetKey()))
+}
+
+// SaveLegacyRoot saves the root when no updates.
+func (ndb *nodeDB) SaveLegacyRoot(version int64, key []byte) error {
+	ndb.mtx.Lock()
+	defer ndb.mtx.Unlock()
+	return ndb.batch.Set(legacyNodeKeyFormat.Key(GetRootKey(version)), legacyNodeKeyFormat.Key(key))
 }
 
 // Traverse fast nodes and return error if any, nil otherwise
