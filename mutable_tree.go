@@ -69,7 +69,8 @@ func NewMutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool, lg lo
 }
 
 func NewLegacyMutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade, noStoreVersion bool,
-	rootHash []byte, lg log.Logger, options ...Option) *MutableTree {
+	rootHash []byte, lg log.Logger, options ...Option,
+) *MutableTree {
 	opts := DefaultOptions()
 	for _, opt := range options {
 		opt(&opts)

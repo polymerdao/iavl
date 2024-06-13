@@ -267,7 +267,6 @@ func MakeLegacyNode(hash, buf []byte) (*Node, error) {
 		node.leftNodeKey = leftHash
 		node.rightNodeKey = rightHash
 	}
-	//fmt.Printf("legacy node: %+v\r\n", *node)
 	return node, nil
 }
 
