@@ -876,7 +876,7 @@ func (ndb *nodeDB) SaveRoot(version int64, nk *NodeKey) error {
 func (ndb *nodeDB) SaveLegacyRoot(version int64, key []byte) error {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
-	return ndb.batch.Set(nodeKeyFormat.Key(GetRootKey(version)), legacyNodeKeyFormat.Key(key))
+	return ndb.batch.Set(legacyNodeKeyFormat.Key(GetRootKey(version)), legacyNodeKeyFormat.Key(key))
 }
 
 // Traverse fast nodes and return error if any, nil otherwise

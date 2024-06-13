@@ -82,6 +82,7 @@ func (i *Importer) writeNode(node *Node) error {
 	copy(bytesCopy, buf.Bytes())
 
 	if i.tree.useLegacyFormat {
+		node.isLegacy = true
 		if err := i.batch.Set(i.tree.ndb.legacyNodeKey(node.GetKey()), bytesCopy); err != nil {
 			return err
 		}
@@ -205,10 +206,18 @@ func (i *Importer) Commit() error {
 		return ErrNoImport
 	}
 
+	var rootHash []byte
 	switch len(i.stack) {
 	case 0:
-		if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
-			return err
+		if i.tree.useLegacyFormat {
+			rootHash = []byte{}
+			if err := i.batch.Set(i.tree.ndb.legacyNodeKey(GetRootKey(i.version)), []byte{}); err != nil {
+				return err
+			}
+		} else {
+			if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
+				return err
+			}
 		}
 	case 1:
 		i.stack[0].nodeKey.nonce = 1
@@ -216,8 +225,18 @@ func (i *Importer) Commit() error {
 			return err
 		}
 		if i.stack[0].nodeKey.version < i.version { // it means there is no update in the given version
-			if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
-				return err
+			if i.tree.useLegacyFormat {
+				if len(i.stack[0].hash) == 0 {
+					i.stack[0]._hash(i.version)
+				}
+				rootHash = i.stack[0].hash
+				if err := i.batch.Set(i.tree.ndb.legacyNodeKey(GetRootKey(i.version)), i.tree.ndb.legacyNodeKey(rootHash)); err != nil {
+					return err
+				}
+			} else {
+				if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
+					return err
+				}
 			}
 		}
 	default:
@@ -231,9 +250,16 @@ func (i *Importer) Commit() error {
 	}
 	i.tree.ndb.resetLatestVersion(i.version)
 
-	_, err = i.tree.LoadVersion(i.version)
-	if err != nil {
-		return err
+	if i.tree.useLegacyFormat {
+		_, err = i.tree.LoadVersionByRootHash(i.version, rootHash)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = i.tree.LoadVersion(i.version)
+		if err != nil {
+			return err
+		}
 	}
 
 	i.Close()
