@@ -68,15 +68,27 @@ func (i *Importer) writeNode(node *Node) error {
 	buf.Reset()
 	defer bufPool.Put(buf)
 
-	if err := node.writeBytes(buf); err != nil {
-		return err
+	if i.tree.useLegacyFormat {
+		if err := node.writeLegacyBytes(buf); err != nil {
+			return err
+		}
+	} else {
+		if err := node.writeBytes(buf); err != nil {
+			return err
+		}
 	}
 
 	bytesCopy := make([]byte, buf.Len())
 	copy(bytesCopy, buf.Bytes())
 
-	if err := i.batch.Set(i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
-		return err
+	if i.tree.useLegacyFormat {
+		if err := i.batch.Set(i.tree.ndb.legacyNodeKey(node.GetKey()), bytesCopy); err != nil {
+			return err
+		}
+	} else {
+		if err := i.batch.Set(i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
+			return err
+		}
 	}
 
 	i.batchSize++

@@ -285,7 +285,7 @@ func (tree *MutableTree) set(key []byte, value []byte) (updated bool, err error)
 		if !tree.skipFastStorageUpgrade {
 			tree.addUnsavedAddition(key, fastnode.NewNode(key, value, tree.version+1))
 		}
-		tree.ImmutableTree.root = NewNode(key, value)
+		tree.ImmutableTree.root = NewNode(key, value, tree.useLegacyFormat)
 		return updated, nil
 	}
 
@@ -344,7 +344,7 @@ func (tree *MutableTree) recursiveSetLeaf(node *Node, key []byte, value []byte) 
 			subtreeHeight: 1,
 			size:          2,
 			nodeKey:       nil,
-			leftNode:      NewNode(key, value),
+			leftNode:      NewNode(key, value, tree.useLegacyFormat),
 			rightNode:     node,
 		}, false, nil
 	case 1: // setKey > leafKey
@@ -354,10 +354,10 @@ func (tree *MutableTree) recursiveSetLeaf(node *Node, key []byte, value []byte) 
 			size:          2,
 			nodeKey:       nil,
 			leftNode:      node,
-			rightNode:     NewNode(key, value),
+			rightNode:     NewNode(key, value, tree.useLegacyFormat),
 		}, false, nil
 	default:
-		return NewNode(key, value), true, nil
+		return NewNode(key, value, tree.useLegacyFormat), true, nil
 	}
 }
 
@@ -805,16 +805,29 @@ func (tree *MutableTree) SaveVersion() ([]byte, int64, error) {
 	} else {
 		if tree.root.nodeKey != nil {
 			// it means there are no updated nodes
-			if err := tree.ndb.SaveRoot(version, tree.root.nodeKey); err != nil {
-				return nil, 0, err
-			}
-			// it means the reference node is a legacy node
-			if tree.root.isLegacy {
-				// it will update the legacy node to the new format
-				// which ensures the reference node is not a legacy node
-				tree.root.isLegacy = tree.useLegacyFormat
+			if tree.useLegacyFormat {
+				if len(tree.root.hash) == 0 {
+					tree.root._hash(version)
+				}
+				if err := tree.ndb.SaveLegacyRoot(version, tree.root.hash); err != nil {
+					return nil, 0, err
+				}
+				tree.root.isLegacy = true
 				if err := tree.ndb.SaveNode(tree.root); err != nil {
 					return nil, 0, fmt.Errorf("failed to save the reference legacy node: %w", err)
+				}
+			} else {
+				if err := tree.ndb.SaveRoot(version, tree.root.nodeKey); err != nil {
+					return nil, 0, err
+				}
+				// it means the reference node is a legacy node
+				if tree.root.isLegacy {
+					// it will update the legacy node to the new format
+					// which ensures the reference node is not a legacy node
+					tree.root.isLegacy = false
+					if err := tree.ndb.SaveNode(tree.root); err != nil {
+						return nil, 0, fmt.Errorf("failed to save the reference legacy node: %w", err)
+					}
 				}
 			}
 		} else {
@@ -1080,16 +1093,14 @@ func (tree *MutableTree) saveNewNodes(version int64) error {
 	var recursiveAssignKey func(*Node) ([]byte, error)
 	recursiveAssignKey = func(node *Node) ([]byte, error) {
 		node.isLegacy = tree.useLegacyFormat
-		if node.nodeKey != nil || (node.isLegacy && node.hash != nil) {
+		if (!node.isLegacy && node.nodeKey != nil) || (node.isLegacy && node.hash != nil) {
 			return node.GetKey(), nil
 		}
 
-		if !node.isLegacy {
-			nonce++
-			node.nodeKey = &NodeKey{
-				version: version,
-				nonce:   nonce,
-			}
+		nonce++
+		node.nodeKey = &NodeKey{
+			version: version,
+			nonce:   nonce,
 		}
 
 		var err error
