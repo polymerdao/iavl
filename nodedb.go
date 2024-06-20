@@ -165,8 +165,11 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 
 	// Doesn't exist, load.
 	isLegacyNode := len(nk) == hashSize
+	//println("key length:")
+	//println(len(nk))
 	var nodeKey []byte
 	if isLegacyNode {
+		println("IS LEGACY NODE")
 		nodeKey = ndb.legacyNodeKey(nk)
 	} else {
 		nodeKey = ndb.nodeKey(nk)
@@ -239,7 +242,7 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
 
-	if node.nodeKey == nil || (ndb.useLegacyFormat && node.hash == nil) {
+	if (!ndb.useLegacyFormat && node.nodeKey == nil) || (ndb.useLegacyFormat && node.hash == nil) {
 		return ErrNodeMissingNodeKey
 	}
 
@@ -699,6 +702,7 @@ func (ndb *nodeDB) resetFirstVersion(version int64) {
 
 func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 	ndb.mtx.Lock()
+	// consider applying latestVersion = ndb.latestVersion here for legacy mode
 	latestVersion := ndb.legacyLatestVersion
 	ndb.mtx.Unlock()
 
@@ -727,10 +731,13 @@ func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 		return 0, err
 	}
 
-	// If there are no legacy versions, set -1
-	ndb.resetLegacyLatestVersion(-1)
+	// If not operating in legacyMode and there are no legacy versions, set -1
+	if !ndb.useLegacyFormat {
+		ndb.resetLegacyLatestVersion(-1)
+		return -1, nil
+	}
 
-	return -1, nil
+	return latestVersion, nil
 }
 
 func (ndb *nodeDB) resetLegacyLatestVersion(version int64) {
@@ -874,7 +881,7 @@ func (ndb *nodeDB) SaveRoot(version int64, nk *NodeKey) error {
 func (ndb *nodeDB) SaveLegacyRoot(version int64, key []byte) error {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
-	return ndb.batch.Set(legacyNodeKeyFormat.Key(GetRootKey(version)), legacyNodeKeyFormat.Key(key))
+	return ndb.batch.Set(ndb.legacyRootKey(version), key)
 }
 
 // Traverse fast nodes and return error if any, nil otherwise

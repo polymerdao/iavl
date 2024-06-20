@@ -47,6 +47,10 @@ func getTestTree(cacheSize int) *MutableTree {
 	return NewMutableTree(dbm.NewMemDB(), cacheSize, false, log.NewNopLogger())
 }
 
+func getLegacyTestTree(cacheSize int) *MutableTree {
+	return NewLegacyMutableTree(dbm.NewMemDB(), cacheSize, false, false, nil, log.NewNopLogger())
+}
+
 // Convenience for a new node
 func N(l, r interface{}) *Node {
 	var left, right *Node
@@ -166,6 +170,17 @@ func getRandomizedTreeAndMirror(t *testing.T) (*MutableTree, map[string]string) 
 	const cacheSize = 100
 
 	tree := getTestTree(cacheSize)
+
+	mirror := make(map[string]string)
+
+	randomizeTreeAndMirror(t, tree, mirror)
+	return tree, mirror
+}
+
+func getRandomizedLegacyTreeAndMirror(t *testing.T) (*MutableTree, map[string]string) {
+	const cacheSize = 100
+
+	tree := getLegacyTestTree(cacheSize)
 
 	mirror := make(map[string]string)
 
