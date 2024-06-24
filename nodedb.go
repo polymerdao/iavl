@@ -165,11 +165,8 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 
 	// Doesn't exist, load.
 	isLegacyNode := len(nk) == hashSize
-	//println("key length:")
-	//println(len(nk))
 	var nodeKey []byte
 	if isLegacyNode {
-		println("IS LEGACY NODE")
 		nodeKey = ndb.legacyNodeKey(nk)
 	} else {
 		nodeKey = ndb.nodeKey(nk)
@@ -570,7 +567,7 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 
 	// If the legacy version is greater than the toVersion, we don't need to delete anything.
 	// It will delete the legacy versions at once.
-	if legacyLatestVersion > toVersion {
+	if !ndb.useLegacyFormat && legacyLatestVersion > toVersion {
 		return nil
 	}
 
@@ -597,8 +594,8 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 	}
 	ndb.mtx.Unlock()
 
-	// Delete the legacy versions
-	if legacyLatestVersion >= first {
+	// Delete the legacy versions unless we are using the legacy format
+	if !ndb.useLegacyFormat && legacyLatestVersion >= first {
 		// Delete the last version for the legacyLastVersion
 		if err := ndb.traverseOrphans(legacyLatestVersion, legacyLatestVersion+1, func(orphan *Node) error {
 			return ndb.batch.Delete(ndb.legacyNodeKey(orphan.hash))
@@ -608,6 +605,7 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 		// reset the legacy latest version forcibly to avoid multiple calls
 		ndb.resetLegacyLatestVersion(-1)
 		go func() {
+			println(legacyLatestVersion)
 			if err := ndb.deleteLegacyVersions(legacyLatestVersion); err != nil {
 				ndb.logger.Error("Error deleting legacy versions", "err", err)
 			}
@@ -703,7 +701,12 @@ func (ndb *nodeDB) resetFirstVersion(version int64) {
 func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 	ndb.mtx.Lock()
 	// consider applying latestVersion = ndb.latestVersion here for legacy mode
-	latestVersion := ndb.legacyLatestVersion
+	var latestVersion int64
+	if ndb.useLegacyFormat {
+		latestVersion = ndb.latestVersion
+	} else {
+		latestVersion = ndb.legacyLatestVersion
+	}
 	ndb.mtx.Unlock()
 
 	if latestVersion != 0 {
@@ -820,6 +823,8 @@ func (ndb *nodeDB) GetRoot(version int64) ([]byte, error) {
 			return nil, err
 		}
 		if val == nil {
+			println("here 2")
+			fmt.Printf("version %d missing\r\n", version)
 			return nil, ErrVersionDoesNotExist
 		}
 		if len(val) == 0 { // empty root
@@ -847,6 +852,7 @@ func (ndb *nodeDB) GetRoot(version int64) ([]byte, error) {
 					return nil, err
 				}
 				if val == nil {
+					println("here 3")
 					return nil, ErrVersionDoesNotExist
 				}
 				return rnk.GetKey(), nil

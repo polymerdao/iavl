@@ -423,10 +423,6 @@ func TestLegacyMutableTree_DeleteVersionsTo(t *testing.T) {
 
 	// delete even versions
 	versionToDelete := int64(8)
-	println("tree version:")
-	println(tree.version)
-	println("using legacy version:")
-	println(tree.useLegacyFormat)
 	require.NoError(t, tree.DeleteVersionsTo(versionToDelete))
 
 	// ensure even versions have been deleted
