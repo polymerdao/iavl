@@ -125,3 +125,23 @@ func TestMutableTreeFuzz(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyMutableTreeFuzz(t *testing.T) {
+	maxIterations := testFuzzIterations
+	progsPerIteration := 100000
+	iterations := 0
+
+	for size := 5; iterations < maxIterations; size++ {
+		for i := 0; i < progsPerIteration/size; i++ {
+			tree := getLegacyTestTree(0)
+			program := genRandomProgram(size)
+			err := program.Execute(tree)
+			if err != nil {
+				str, err := tree.String()
+				require.Nil(t, err)
+				t.Fatalf("Error after %d iterations (size %d): %s\n%s", iterations, size, err.Error(), str)
+			}
+			iterations++
+		}
+	}
+}
