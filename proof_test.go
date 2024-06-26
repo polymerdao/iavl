@@ -39,8 +39,71 @@ func TestTreeGetProof(t *testing.T) {
 	require.True(res)
 }
 
+func TestLegacyTreeGetProof(t *testing.T) {
+	require := require.New(t)
+	tree := getLegacyTestTree(0)
+	for _, ikey := range []byte{0x11, 0x32, 0x50, 0x72, 0x99} {
+		key := []byte{ikey}
+		tree.Set(key, []byte(iavlrand.RandStr(8)))
+	}
+
+	key := []byte{0x32}
+	proof, err := tree.GetMembershipProof(key)
+	require.NoError(err)
+	require.NotNil(proof)
+
+	res, err := tree.VerifyMembership(proof, key)
+	require.NoError(err, "%+v", err)
+	require.True(res)
+
+	key = []byte{0x1}
+	proof, err = tree.GetNonMembershipProof(key)
+	require.NoError(err)
+	require.NotNil(proof)
+
+	res, err = tree.VerifyNonMembership(proof, key)
+	require.NoError(err, "%+v", err)
+	require.True(res)
+}
+
 func TestTreeKeyExistsProof(t *testing.T) {
 	tree := getTestTree(0)
+
+	// should get error
+	_, err := tree.GetProof([]byte("foo"))
+	assert.Error(t, err)
+
+	// insert lots of info and store the bytes
+	allkeys := make([][]byte, 200)
+	for i := 0; i < 200; i++ {
+		key := iavlrand.RandStr(20)
+		value := "value_for_" + key
+		tree.Set([]byte(key), []byte(value))
+		allkeys[i] = []byte(key)
+	}
+	sortByteSlices(allkeys) // Sort all keys
+
+	// query random key fails
+	_, err = tree.GetMembershipProof([]byte("foo"))
+	require.Error(t, err)
+
+	// valid proof for real keys
+	for _, key := range allkeys {
+		proof, err := tree.GetMembershipProof(key)
+		require.NoError(t, err)
+		require.Equal(t,
+			append([]byte("value_for_"), key...),
+			proof.GetExist().Value,
+		)
+
+		res, err := tree.VerifyMembership(proof, key)
+		require.NoError(t, err)
+		require.True(t, res)
+	}
+}
+
+func TestLegacyTreeKeyExistsProof(t *testing.T) {
+	tree := getLegacyTestTree(0)
 
 	// should get error
 	_, err := tree.GetProof([]byte("foo"))
