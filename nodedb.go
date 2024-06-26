@@ -1293,11 +1293,20 @@ func (ndb *nodeDB) size() int {
 func (ndb *nodeDB) traverseNodes(fn func(node *Node) error) error {
 	nodes := []*Node{}
 
-	if err := ndb.traversePrefix(nodeKeyFormat.Prefix(), func(key, value []byte) error {
+	var prefix []byte
+	var nodeMaker func(hash, buf []byte) (*Node, error)
+	if ndb.useLegacyFormat {
+		prefix = legacyNodeKeyFormat.Prefix()
+		nodeMaker = MakeLegacyNode
+	} else {
+		prefix = nodeKeyFormat.Prefix()
+		nodeMaker = MakeNode
+	}
+	if err := ndb.traversePrefix(prefix, func(key, value []byte) error {
 		if isRef, _ := isReferenceRoot(value); isRef {
 			return nil
 		}
-		node, err := MakeNode(key[1:], value)
+		node, err := nodeMaker(key[1:], value)
 		if err != nil {
 			return err
 		}
