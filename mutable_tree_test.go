@@ -737,7 +737,6 @@ func TestMutableTree_DeleteVersion(t *testing.T) {
 
 func TestLegacyMutableTree_DeleteVersion(t *testing.T) {
 	tree := prepareLegacyTree(t)
-	println("break")
 	ver, err := tree.LoadVersion(2)
 	require.True(t, ver == 2)
 	require.NoError(t, err)

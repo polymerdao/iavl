@@ -244,6 +244,7 @@ func MakeLegacyNode(hash, buf []byte) (*Node, error) {
 		nodeKey:       &NodeKey{version: ver},
 		key:           key,
 		hash:          hash,
+		isLegacy:      true,
 	}
 
 	// Read node body.
@@ -561,7 +562,16 @@ func (node *Node) encodedSize() int {
 		encoding.EncodeBytesSize(node.key)
 	if node.isLeaf() {
 		n += encoding.EncodeBytesSize(node.value)
-	} else {
+	}
+	if node.isLegacy {
+		n += encoding.EncodeVarintSize(node.nodeKey.version)
+		if !node.isLeaf() {
+			n += encoding.EncodeBytesSize(node.leftNodeKey) +
+				encoding.EncodeBytesSize(node.rightNodeKey)
+		}
+		return n
+	}
+	if !node.isLeaf() {
 		n += encoding.EncodeBytesSize(node.hash)
 		if node.leftNodeKey != nil {
 			nk := GetNodeKey(node.leftNodeKey)
@@ -694,6 +704,7 @@ func (node *Node) writeLegacyBytes(w io.Writer) error {
 		}
 	} else {
 		if len(node.leftNodeKey) != hashSize {
+			fmt.Printf("left node key: %x\r\n", node.leftNodeKey)
 			return errors.New("node provided to writeLegacyBytes does not have a hash for leftNodeKey")
 		}
 		err = encoding.EncodeBytes(w, node.leftNodeKey)
@@ -701,7 +712,7 @@ func (node *Node) writeLegacyBytes(w io.Writer) error {
 			return fmt.Errorf("writing left hash, %w", err)
 		}
 
-		if len(node.leftNodeKey) != 32 {
+		if len(node.leftNodeKey) != hashSize {
 			return errors.New("node provided to writeLegacyBytes does not have a hash for rightNodeKey")
 		}
 		err = encoding.EncodeBytes(w, node.rightNodeKey)

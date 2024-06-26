@@ -236,7 +236,15 @@ func (tree *MutableTree) Import(version int64) (*Importer, error) {
 // since they may point to data stored within IAVL. Returns true if stopped by callnack, false otherwise
 func (tree *MutableTree) Iterate(fn func(key []byte, value []byte) bool) (stopped bool, err error) {
 	if tree.root == nil {
-		return false, nil
+		if tree.rootHash != nil {
+			root, err := tree.ndb.GetNode(tree.rootHash)
+			if err != nil {
+				return false, err
+			}
+			tree.root = root
+		} else {
+			return false, nil
+		}
 	}
 
 	if tree.skipFastStorageUpgrade {
@@ -367,7 +375,15 @@ func (tree *MutableTree) recursiveSetLeaf(node *Node, key []byte, value []byte) 
 // after this call, since it may point to data stored inside IAVL.
 func (tree *MutableTree) Remove(key []byte) ([]byte, bool, error) {
 	if tree.root == nil {
-		return nil, false, nil
+		if tree.rootHash != nil {
+			root, err := tree.ndb.GetNode(tree.rootHash)
+			if err != nil {
+				return nil, false, err
+			}
+			tree.root = root
+		} else {
+			return nil, false, nil
+		}
 	}
 	newRoot, _, value, removed, err := tree.recursiveRemove(tree.root, key)
 	if err != nil {

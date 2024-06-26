@@ -23,6 +23,8 @@ type ImmutableTree struct {
 	ndb                    *nodeDB
 	version                int64
 	skipFastStorageUpgrade bool
+	useLegacyFormat        bool // If true, save nodes to the DB with the legacy format
+	rootHash               []byte
 }
 
 // NewImmutableTree creates both in-memory and persistent instances
@@ -42,6 +44,29 @@ func NewImmutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool, lg 
 		// NodeDB-backed Tree.
 		ndb:                    newNodeDB(db, cacheSize, opts, lg),
 		skipFastStorageUpgrade: skipFastStorageUpgrade,
+	}
+}
+
+// NewLegacyImmutableTree creates both in-memory and persistent instances
+func NewLegacyImmutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool, noStoreVersion bool,
+	rootHash []byte, lg log.Logger, options ...Option) *ImmutableTree {
+	opts := DefaultOptions()
+	for _, opt := range options {
+		opt(&opts)
+	}
+
+	if db == nil {
+		// In-memory Tree.
+		return &ImmutableTree{}
+	}
+
+	return &ImmutableTree{
+		logger: lg,
+		// NodeDB-backed Tree.
+		ndb:                    newLegacyNodeDB(db, cacheSize, opts, noStoreVersion, lg),
+		skipFastStorageUpgrade: skipFastStorageUpgrade,
+		useLegacyFormat:        true,
+		rootHash:               rootHash,
 	}
 }
 
@@ -145,7 +170,15 @@ func (t *ImmutableTree) Height() int8 {
 // Has returns whether or not a key exists.
 func (t *ImmutableTree) Has(key []byte) (bool, error) {
 	if t.root == nil {
-		return false, nil
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return false, err
+			}
+			t.root = root
+		} else {
+			return false, nil
+		}
 	}
 	return t.root.has(t, key)
 }
@@ -169,7 +202,15 @@ func (t *ImmutableTree) Export() (*Exporter, error) {
 // It's neighbor has index 1 and so on.
 func (t *ImmutableTree) GetWithIndex(key []byte) (int64, []byte, error) {
 	if t.root == nil {
-		return 0, nil, nil
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return 0, nil, err
+			}
+			t.root = root
+		} else {
+			return 0, nil, nil
+		}
 	}
 	return t.root.get(t, key)
 }
@@ -180,7 +221,15 @@ func (t *ImmutableTree) GetWithIndex(key []byte) (int64, []byte, error) {
 // If tree.skipFastStorageUpgrade is true, this will work almost the same as GetWithIndex.
 func (t *ImmutableTree) Get(key []byte) ([]byte, error) {
 	if t.root == nil {
-		return nil, nil
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return nil, err
+			}
+			t.root = root
+		} else {
+			return nil, nil
+		}
 	}
 
 	if !t.skipFastStorageUpgrade {
@@ -219,7 +268,15 @@ func (t *ImmutableTree) Get(key []byte) ([]byte, error) {
 // GetByIndex gets the key and value at the specified index.
 func (t *ImmutableTree) GetByIndex(index int64) (key []byte, value []byte, err error) {
 	if t.root == nil {
-		return nil, nil, nil
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return nil, nil, err
+			}
+			t.root = root
+		} else {
+			return nil, nil, nil
+		}
 	}
 
 	return t.root.getByIndex(t, index)
@@ -229,7 +286,15 @@ func (t *ImmutableTree) GetByIndex(index int64) (key []byte, value []byte, err e
 // since they may point to data stored within IAVL. Returns true if stopped by callback, false otherwise
 func (t *ImmutableTree) Iterate(fn func(key []byte, value []byte) bool) (bool, error) {
 	if t.root == nil {
-		return false, nil
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return false, err
+			}
+			t.root = root
+		} else {
+			return false, nil
+		}
 	}
 
 	itr, err := t.Iterator(nil, nil, true)
@@ -266,7 +331,15 @@ func (t *ImmutableTree) Iterator(start, end []byte, ascending bool) (corestore.I
 // values must not be modified, since they may point to data stored within IAVL.
 func (t *ImmutableTree) IterateRange(start, end []byte, ascending bool, fn func(key []byte, value []byte) bool) (stopped bool) {
 	if t.root == nil {
-		return false
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return false
+			}
+			t.root = root
+		} else {
+			return false
+		}
 	}
 	return t.root.traverseInRange(t, start, end, ascending, false, false, func(node *Node) bool {
 		if node.subtreeHeight == 0 {
@@ -281,7 +354,15 @@ func (t *ImmutableTree) IterateRange(start, end []byte, ascending bool, fn func(
 // values must not be modified, since they may point to data stored within IAVL.
 func (t *ImmutableTree) IterateRangeInclusive(start, end []byte, ascending bool, fn func(key, value []byte, version int64) bool) (stopped bool) {
 	if t.root == nil {
-		return false
+		if t.rootHash != nil {
+			root, err := t.ndb.GetNode(t.rootHash)
+			if err != nil {
+				return false
+			}
+			t.root = root
+		} else {
+			return false
+		}
 	}
 	return t.root.traverseInRange(t, start, end, ascending, true, false, func(node *Node) bool {
 		if node.subtreeHeight == 0 {
