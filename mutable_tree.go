@@ -511,7 +511,6 @@ func (tree *MutableTree) LoadVersion(targetVersion int64) (int64, error) {
 		targetVersion = latestVersion
 	}
 	if !tree.VersionExists(targetVersion) {
-		println("here 1")
 		return 0, ErrVersionDoesNotExist
 	}
 	rootNodeKey, err := tree.ndb.GetRoot(targetVersion)
