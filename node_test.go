@@ -39,6 +39,33 @@ func TestNode_encodedSize(t *testing.T) {
 	require.Equal(t, 39, node.encodedSize())
 }
 
+func TestLegacyNode_encodedSize(t *testing.T) {
+	nodeKey := &NodeKey{
+		version: 1,
+		nonce:   1,
+	}
+	node := &Node{
+		key:           iavlrand.RandBytes(10),
+		value:         iavlrand.RandBytes(10),
+		subtreeHeight: 0,
+		size:          100,
+		hash:          iavlrand.RandBytes(20),
+		nodeKey:       nodeKey,
+		leftNodeKey:   iavlrand.RandBytes(32),
+		leftNode:      nil,
+		rightNodeKey:  iavlrand.RandBytes(32),
+		rightNode:     nil,
+		isLegacy:      true,
+	}
+
+	// leaf node
+	require.Equal(t, 26, node.encodedSize())
+
+	// non-leaf node
+	node.subtreeHeight = 1
+	require.Equal(t, 81, node.encodedSize())
+}
+
 func TestNode_encode_decode(t *testing.T) {
 	childNodeKey := &NodeKey{
 		version: 1,
@@ -113,6 +140,81 @@ func TestNode_encode_decode(t *testing.T) {
 	}
 }
 
+func TestLegacyNode_encode_decode(t *testing.T) {
+	iavlrand.Seed(1337)
+	childNodeHashKey := iavlrand.RandBytes(32)
+	childNodeHash := []byte{0x7f, 0x68, 0x90, 0xca, 0x16, 0xde, 0xa6, 0xe8, 0x89, 0x3d, 0x96, 0xf0, 0xa3, 0xd, 0xa, 0x14, 0xe5, 0x55, 0x59, 0xfc, 0x9b, 0x83, 0x4, 0x91, 0xe3, 0xd2, 0x45, 0x1c, 0x81, 0xf6, 0xd1, 0xe}
+	testcases := map[string]struct {
+		node        *Node
+		expectHex   string
+		expectError bool
+	}{
+		"nil": {nil, "", true},
+		"inner": {&Node{
+			subtreeHeight: 3,
+			size:          7,
+			key:           []byte("key"),
+			nodeKey: &NodeKey{
+				version: 2,
+				nonce:   0,
+			},
+			leftNodeKey:  childNodeHashKey,
+			rightNodeKey: childNodeHashKey,
+			hash:         []byte{0x7f, 0x68, 0x90, 0xca, 0x16, 0xde, 0xa6, 0xe8, 0x89, 0x3d, 0x96, 0xf0, 0xa3, 0xd, 0xa, 0x14, 0xe5, 0x55, 0x59, 0xfc, 0x9b, 0x83, 0x4, 0x91, 0xe3, 0xd2, 0x45, 0x1c, 0x81, 0xf6, 0xd1, 0xe},
+			isLegacy:     true,
+		}, "060e04036b65792026429483d02d520734e5408754139293c0b70564faffec9d46f109731ea3f4bb2026429483d02d520734e5408754139293c0b70564faffec9d46f109731ea3f4bb", false},
+		"inner hybrid": {&Node{
+			subtreeHeight: 3,
+			size:          7,
+			key:           []byte("key"),
+			nodeKey: &NodeKey{
+				version: 2,
+				nonce:   0,
+			},
+			leftNodeKey:  childNodeHashKey,
+			rightNodeKey: childNodeHash,
+			hash:         []byte{0x7f, 0x68, 0x90, 0xca, 0x16, 0xde, 0xa6, 0xe8, 0x89, 0x3d, 0x96, 0xf0, 0xa3, 0xd, 0xa, 0x14, 0xe5, 0x55, 0x59, 0xfc, 0x9b, 0x83, 0x4, 0x91, 0xe3, 0xd2, 0x45, 0x1c, 0x81, 0xf6, 0xd1, 0xe},
+			isLegacy:     true,
+		}, "060e04036b65792026429483d02d520734e5408754139293c0b70564faffec9d46f109731ea3f4bb207f6890ca16dea6e8893d96f0a30d0a14e55559fc9b830491e3d2451c81f6d10e", false},
+		"leaf": {&Node{
+			subtreeHeight: 0,
+			size:          1,
+			key:           []byte("key"),
+			value:         []byte("value"),
+			nodeKey: &NodeKey{
+				version: 3,
+				nonce:   0,
+			},
+			hash:     []byte{0x7f, 0x68, 0x90, 0xca, 0x16, 0xde, 0xa6, 0xe8, 0x89, 0x3d, 0x96, 0xf0, 0xa3, 0xd, 0xa, 0x14, 0xe5, 0x55, 0x59, 0xfc, 0x9b, 0x83, 0x4, 0x91, 0xe3, 0xd2, 0x45, 0x1c, 0x81, 0xf6, 0xd1, 0xe},
+			isLegacy: true,
+		}, "000206036b65790576616c7565", false},
+	}
+	for name, tc := range testcases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := tc.node.writeLegacyBytes(&buf)
+			if tc.expectError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expectHex, hex.EncodeToString(buf.Bytes()))
+
+			node, err := MakeLegacyNode(tc.node.GetKey(), buf.Bytes())
+			require.NoError(t, err)
+			// since key and value is always decoded to []byte{} we augment the expected struct here
+			if tc.node.key == nil {
+				tc.node.key = []byte{}
+			}
+			if tc.node.value == nil && tc.node.subtreeHeight == 0 {
+				tc.node.value = []byte{}
+			}
+			require.Equal(t, tc.node, node)
+		})
+	}
+}
+
 func TestNode_validate(t *testing.T) {
 	k := []byte("key")
 	v := []byte("value")
@@ -149,6 +251,57 @@ func TestNode_validate(t *testing.T) {
 		"inner with right child":   {&Node{key: k, size: 1, subtreeHeight: 1, nodeKey: nk, rightNodeKey: nk.GetKey()}, true},
 		"inner with no child":      {&Node{key: k, size: 1, subtreeHeight: 1}, false},
 		"inner with height 0":      {&Node{key: k, size: 1, subtreeHeight: 0, leftNodeKey: nk.GetKey(), rightNodeKey: nk.GetKey()}, false},
+	}
+
+	for desc, tc := range testcases {
+		tc := tc // appease scopelint
+		t.Run(desc, func(t *testing.T) {
+			err := tc.node.validate()
+			if tc.valid {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestLegacyNode_validate(t *testing.T) {
+	k := []byte("key")
+	v := []byte("value")
+	nk := &NodeKey{
+		version: 1,
+		nonce:   1,
+	}
+	c := &Node{key: []byte("child"), value: []byte("x"), size: 1}
+
+	testcases := map[string]struct {
+		node  *Node
+		valid bool
+	}{
+		"nil node":                 {nil, false},
+		"leaf":                     {&Node{key: k, value: v, nodeKey: nk, size: 1}, true},
+		"leaf with nil key":        {&Node{key: nil, value: v, size: 1}, false},
+		"leaf with empty key":      {&Node{key: []byte{}, value: v, nodeKey: nk, size: 1}, true},
+		"leaf with nil value":      {&Node{key: k, value: nil, size: 1}, false},
+		"leaf with empty value":    {&Node{key: k, value: []byte{}, nodeKey: nk, size: 1}, true},
+		"leaf with version 0":      {&Node{key: k, value: v, size: 1}, false},
+		"leaf with version -1":     {&Node{key: k, value: v, size: 1}, false},
+		"leaf with size 0":         {&Node{key: k, value: v, size: 0}, false},
+		"leaf with size 2":         {&Node{key: k, value: v, size: 2}, false},
+		"leaf with size -1":        {&Node{key: k, value: v, size: -1}, false},
+		"leaf with left node key":  {&Node{key: k, value: v, size: 1, leftNodeKey: iavlrand.RandBytes(32)}, false},
+		"leaf with left child":     {&Node{key: k, value: v, size: 1, leftNode: c}, false},
+		"leaf with right node key": {&Node{key: k, value: v, size: 1, rightNodeKey: iavlrand.RandBytes(32)}, false},
+		"leaf with right child":    {&Node{key: k, value: v, size: 1, rightNode: c}, false},
+		"inner":                    {&Node{key: k, size: 1, subtreeHeight: 1, nodeKey: nk, leftNodeKey: iavlrand.RandBytes(32), rightNodeKey: iavlrand.RandBytes(32)}, true},
+		"inner with nil key":       {&Node{key: nil, value: v, size: 1, subtreeHeight: 1, leftNodeKey: iavlrand.RandBytes(32), rightNodeKey: iavlrand.RandBytes(32)}, false},
+		"inner with value":         {&Node{key: k, value: v, size: 1, subtreeHeight: 1, leftNodeKey: iavlrand.RandBytes(32), rightNodeKey: iavlrand.RandBytes(32)}, false},
+		"inner with empty value":   {&Node{key: k, value: []byte{}, size: 1, subtreeHeight: 1, leftNodeKey: iavlrand.RandBytes(32), rightNodeKey: iavlrand.RandBytes(32)}, false},
+		"inner with left child":    {&Node{key: k, size: 1, subtreeHeight: 1, nodeKey: nk, leftNodeKey: iavlrand.RandBytes(32)}, true},
+		"inner with right child":   {&Node{key: k, size: 1, subtreeHeight: 1, nodeKey: nk, rightNodeKey: iavlrand.RandBytes(32)}, true},
+		"inner with no child":      {&Node{key: k, size: 1, subtreeHeight: 1}, false},
+		"inner with height 0":      {&Node{key: k, size: 1, subtreeHeight: 0, leftNodeKey: iavlrand.RandBytes(32), rightNodeKey: iavlrand.RandBytes(32)}, false},
 	}
 
 	for desc, tc := range testcases {
