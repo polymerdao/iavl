@@ -211,7 +211,7 @@ func (i *Importer) Commit() error {
 	case 0:
 		if i.tree.useLegacyFormat {
 			rootHash = []byte{}
-			if err := i.batch.Set(i.tree.ndb.legacyNodeKey(GetRootKey(i.version)), []byte{}); err != nil {
+			if err := i.batch.Set(i.tree.ndb.legacyRootKey(i.version), []byte{}); err != nil {
 				return err
 			}
 		} else {
@@ -230,7 +230,7 @@ func (i *Importer) Commit() error {
 					i.stack[0]._hash(i.version)
 				}
 				rootHash = i.stack[0].hash
-				if err := i.batch.Set(i.tree.ndb.legacyNodeKey(GetRootKey(i.version)), i.tree.ndb.legacyNodeKey(rootHash)); err != nil {
+				if err := i.batch.Set(i.tree.ndb.legacyRootKey(i.version), i.tree.ndb.legacyNodeKey(rootHash)); err != nil {
 					return err
 				}
 			} else {

@@ -656,7 +656,7 @@ func prepareLegacyTree(t *testing.T) *MutableTree {
 	require.True(t, ver == 2)
 	require.NoError(t, err)
 
-	newTree := NewMutableTree(mdb, 1000, false, log.NewNopLogger())
+	newTree := NewLegacyMutableTree(mdb, 1000, false, false, nil, log.NewNopLogger())
 
 	return newTree
 }
@@ -737,6 +737,7 @@ func TestMutableTree_DeleteVersion(t *testing.T) {
 
 func TestLegacyMutableTree_DeleteVersion(t *testing.T) {
 	tree := prepareLegacyTree(t)
+	println("break")
 	ver, err := tree.LoadVersion(2)
 	require.True(t, ver == 2)
 	require.NoError(t, err)
@@ -2816,7 +2817,8 @@ func TestLegacyMutableTree_InitialVersion_FirstVersion(t *testing.T) {
 	_, version, err := tree.SaveVersion()
 	require.NoError(t, err)
 	require.Equal(t, initialVersion, version)
-	rootKey := GetRootKey(version)
+	rootKey, err := tree.ndb.GetRoot(version)
+	require.NoError(t, err)
 	// the nodes created at the first version are not assigned with the `InitialVersion`
 	node, err := tree.ndb.GetNode(rootKey)
 	require.NoError(t, err)
@@ -2828,7 +2830,8 @@ func TestLegacyMutableTree_InitialVersion_FirstVersion(t *testing.T) {
 	_, version, err = tree.SaveVersion()
 	require.NoError(t, err)
 	require.Equal(t, initialVersion+1, version)
-	rootKey = GetRootKey(version)
+	rootKey, err = tree.ndb.GetRoot(version)
+	require.NoError(t, err)
 	// the following versions behaves normally
 	node, err = tree.ndb.GetNode(rootKey)
 	require.NoError(t, err)
