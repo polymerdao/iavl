@@ -385,7 +385,13 @@ func (t *ImmutableTree) IsFastCacheEnabled() (bool, error) {
 }
 
 func (t *ImmutableTree) isLatestTreeVersion() (bool, error) {
-	latestVersion, err := t.ndb.getLatestVersion()
+	var latestVersion int64
+	var err error
+	if t.useLegacyFormat {
+		latestVersion, err = t.ndb.getLegacyLatestVersion()
+	} else {
+		latestVersion, err = t.ndb.getLatestVersion()
+	}
 	if err != nil {
 		return false, err
 	}

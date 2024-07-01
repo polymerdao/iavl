@@ -330,7 +330,13 @@ func (ndb *nodeDB) shouldForceFastStorageUpgrade() (bool, error) {
 	versions := strings.Split(ndb.storageVersion, fastStorageVersionDelimiter)
 
 	if len(versions) == 2 {
-		latestVersion, err := ndb.getLatestVersion()
+		var latestVersion int64
+		var err error
+		if ndb.useLegacyFormat {
+			latestVersion, err = ndb.getLegacyLatestVersion()
+		} else {
+			latestVersion, err = ndb.getLatestVersion()
+		}
 		if err != nil {
 			// TODO: should be true or false as default? (removed panic here)
 			return false, err
@@ -491,7 +497,7 @@ func (ndb *nodeDB) deleteLegacyOrphans(version int64) error {
 		// can delete the orphan.  Otherwise, we shorten its lifetime, by
 		// moving its endpoint to the previous version.
 		if predecessor < fromVersion || fromVersion == toVersion {
-			if err := ndb.batch.Delete(ndb.nodeKey(hash)); err != nil {
+			if err := ndb.batch.Delete(ndb.legacyNodeKey(hash)); err != nil {
 				return err
 			}
 			ndb.nodeCache.Remove(hash)
@@ -571,6 +577,7 @@ func (ndb *nodeDB) deleteLegacyVersions(legacyLatestVersion int64) error {
 // deleteLegacyVersion deletes a legacy tree version from disk.
 // calls deleteOrphans(version), deleteRoot(version, checkLatestVersion)
 func (ndb *nodeDB) deleteLegacyVersion(version int64, checkLatestVersion bool) error {
+	// TODO: HERE
 	if ndb.versionReaders[version] > 0 {
 		return fmt.Errorf("unable to delete version %v, it has %v active readers", version, ndb.versionReaders[version])
 	}
@@ -589,6 +596,46 @@ func (ndb *nodeDB) deleteLegacyVersion(version int64, checkLatestVersion bool) e
 
 // DeleteVersionsFrom permanently deletes all tree versions from the given version upwards.
 func (ndb *nodeDB) DeleteVersionsFrom(fromVersion int64) error {
+	if ndb.useLegacyFormat {
+		latest, err := ndb.getLegacyLatestVersion()
+		if err != nil {
+			return err
+		}
+		if latest < fromVersion {
+			return nil
+		}
+
+		ndb.mtx.Lock()
+		for v, r := range ndb.versionReaders {
+			if v >= fromVersion && r != 0 {
+				ndb.mtx.Unlock() // Unlock before exiting
+				return fmt.Errorf("unable to delete version %v with %v active readers", v, r)
+			}
+		}
+		ndb.mtx.Unlock()
+		// TODO: HERE
+		// Delete the nodes for new format
+		if err := ndb.traverseRange(legacyRootKeyFormat.Key(fromVersion), legacyRootKeyFormat.Key(latest+1), func(k, v []byte) error {
+			var version int64
+			legacyRootKeyFormat.Scan(k, &version)
+			// delete the legacy nodes
+			if err := ndb.deleteLegacyNodes(version, v); err != nil {
+				return err
+			}
+			if err := ndb.deleteLegacyOrphans(version); err != nil {
+				return err
+			}
+			// it will skip the orphans because orphans will be removed at once in `deleteLegacyVersions`
+			// delete the legacy root
+			return ndb.batch.Delete(k)
+		}); err != nil {
+			return err
+		}
+
+		ndb.resetLegacyLatestVersion(fromVersion - 1)
+
+		return nil
+	}
 	latest, err := ndb.getLatestVersion()
 	if err != nil {
 		return err
@@ -647,6 +694,39 @@ func (ndb *nodeDB) DeleteVersionsFrom(fromVersion int64) error {
 
 // DeleteVersionsTo deletes the oldest versions up to the given version from disk.
 func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
+	if ndb.useLegacyFormat {
+		legacyLatestVersion, err := ndb.getLegacyLatestVersion()
+		if err != nil {
+			return err
+		}
+
+		first, err := ndb.getFirstLegacyVersion()
+		if err != nil {
+			return err
+		}
+
+		if legacyLatestVersion <= toVersion {
+			return fmt.Errorf("latest version %d is less than or equal to toVersion %d", legacyLatestVersion, toVersion)
+		}
+
+		ndb.mtx.Lock()
+		for v, r := range ndb.versionReaders {
+			if v >= first && v <= toVersion && r != 0 {
+				ndb.mtx.Unlock()
+				return fmt.Errorf("unable to delete version %d with %d active readers", v, r)
+			}
+		}
+		ndb.mtx.Unlock()
+
+		for version := first; version <= toVersion; version++ {
+			if err := ndb.deleteLegacyVersion(version, true); err != nil {
+				return err
+			}
+			ndb.resetFirstVersion(version + 1)
+		}
+
+		return nil
+	}
 	legacyLatestVersion, err := ndb.getLegacyLatestVersion()
 	if err != nil {
 		return err
@@ -654,7 +734,7 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 
 	// If the legacy version is greater than the toVersion, we don't need to delete anything.
 	// It will delete the legacy versions at once.
-	if !ndb.useLegacyFormat && legacyLatestVersion > toVersion {
+	if legacyLatestVersion > toVersion {
 		return nil
 	}
 
@@ -681,8 +761,8 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 	}
 	ndb.mtx.Unlock()
 
-	// Delete the legacy versions unless we are using the legacy format
-	if !ndb.useLegacyFormat && legacyLatestVersion >= first {
+	// Delete the legacy versions
+	if legacyLatestVersion >= first {
 		// Delete the last version for the legacyLastVersion
 		if err := ndb.traverseOrphans(legacyLatestVersion, legacyLatestVersion+1, func(orphan *Node) error {
 			return ndb.batch.Delete(ndb.legacyNodeKey(orphan.hash))
@@ -700,14 +780,8 @@ func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
 	}
 
 	for version := first; version <= toVersion; version++ {
-		if ndb.useLegacyFormat {
-			if err := ndb.deleteLegacyVersion(version, true); err != nil {
-				return err
-			}
-		} else {
-			if err := ndb.deleteVersion(version); err != nil {
-				return err
-			}
+		if err := ndb.deleteVersion(version); err != nil {
+			return err
 		}
 		ndb.resetFirstVersion(version + 1)
 	}
@@ -788,9 +862,41 @@ func (ndb *nodeDB) getFirstVersion() (int64, error) {
 	return latestVersion, nil
 }
 
+func (ndb *nodeDB) getFirstLegacyVersion() (int64, error) {
+	ndb.mtx.Lock()
+	firstVersion := ndb.firstVersion
+	ndb.mtx.Unlock()
+
+	if firstVersion > 0 {
+		return firstVersion, nil
+	}
+
+	// Find the first version
+	latestVersion, err := ndb.getLegacyLatestVersion()
+	if err != nil {
+		return 0, err
+	}
+	for firstVersion < latestVersion {
+		version := (latestVersion + firstVersion) >> 1
+		has, err := ndb.hasLegacyVersion(version)
+		if err != nil {
+			return 0, err
+		}
+		if has {
+			latestVersion = version
+		} else {
+			firstVersion = version + 1
+		}
+	}
+
+	ndb.resetFirstVersion(latestVersion)
+
+	return latestVersion, nil
+}
+
 // deleteRoot deletes the root entry from disk, but not the node it points to.
 func (ndb *nodeDB) deleteLegacyRoot(version int64, checkLatestVersion bool) error {
-	latestVersion, err := ndb.getLatestVersion()
+	latestVersion, err := ndb.getLegacyLatestVersion()
 	if err != nil {
 		return err
 	}
@@ -813,15 +919,8 @@ func (ndb *nodeDB) resetFirstVersion(version int64) {
 
 func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 	ndb.mtx.Lock()
-	// consider applying latestVersion = ndb.latestVersion here for legacy mode
 	latestVersion := ndb.legacyLatestVersion
-	/*
-		if ndb.useLegacyFormat {
-			latestVersion = ndb.latestVersion
-		}
-	*/
 	ndb.mtx.Unlock()
-
 	if latestVersion != 0 {
 		return latestVersion, nil
 	}
