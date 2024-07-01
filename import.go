@@ -31,6 +31,7 @@ type Importer struct {
 
 	// inflightCommit tracks a batch commit, if any.
 	inflightCommit <-chan error
+	useLegacy      bool
 }
 
 // newImporter creates a new Importer for an empty MutableTree.
@@ -47,13 +48,13 @@ func newImporter(tree *MutableTree, version int64) (*Importer, error) {
 	if !tree.IsEmpty() {
 		return nil, errors.New("tree must be empty")
 	}
-
 	return &Importer{
-		tree:    tree,
-		version: version,
-		batch:   tree.ndb.db.NewBatch(),
-		stack:   make([]*Node, 0, 8),
-		nonces:  make([]uint32, version+1),
+		tree:      tree,
+		version:   version,
+		batch:     tree.ndb.db.NewBatch(),
+		stack:     make([]*Node, 0, 8),
+		nonces:    make([]uint32, version+1),
+		useLegacy: tree.useLegacyFormat,
 	}, nil
 }
 
@@ -68,15 +69,28 @@ func (i *Importer) writeNode(node *Node) error {
 	buf.Reset()
 	defer bufPool.Put(buf)
 
-	if err := node.writeBytes(buf); err != nil {
-		return err
+	if i.tree.useLegacyFormat {
+		if err := node.writeLegacyBytes(buf); err != nil {
+			return err
+		}
+	} else {
+		if err := node.writeBytes(buf); err != nil {
+			return err
+		}
 	}
 
 	bytesCopy := make([]byte, buf.Len())
 	copy(bytesCopy, buf.Bytes())
 
-	if err := i.batch.Set(i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
-		return err
+	if i.tree.useLegacyFormat {
+		node.isLegacy = true
+		if err := i.batch.Set(i.tree.ndb.legacyNodeKey(node.GetKey()), bytesCopy); err != nil {
+			return err
+		}
+	} else {
+		if err := i.batch.Set(i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
+			return err
+		}
 	}
 
 	i.batchSize++
@@ -136,6 +150,7 @@ func (i *Importer) Add(exportNode *ExportNode) error {
 		key:           exportNode.Key,
 		value:         exportNode.Value,
 		subtreeHeight: exportNode.Height,
+		isLegacy:      i.useLegacy,
 	}
 
 	// We build the tree from the bottom-left up. The stack is used to store unresolved left
@@ -154,6 +169,12 @@ func (i *Importer) Add(exportNode *ExportNode) error {
 
 		node.leftNode = leftNode
 		node.rightNode = rightNode
+		if leftNode.isLegacy && len(leftNode.hash) == 0 {
+			leftNode._hash(leftNode.nodeKey.version)
+		}
+		if rightNode.isLegacy && len(rightNode.hash) == 0 {
+			rightNode._hash(rightNode.nodeKey.version)
+		}
 		node.leftNodeKey = leftNode.GetKey()
 		node.rightNodeKey = rightNode.GetKey()
 		node.size = leftNode.size + rightNode.size
@@ -193,19 +214,39 @@ func (i *Importer) Commit() error {
 		return ErrNoImport
 	}
 
+	var rootHash []byte
 	switch len(i.stack) {
 	case 0:
-		if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
-			return err
+		if i.tree.useLegacyFormat {
+			rootHash = []byte{}
+			if err := i.batch.Set(i.tree.ndb.legacyRootKey(i.version), []byte{}); err != nil {
+				return err
+			}
+		} else {
+			if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
+				return err
+			}
 		}
 	case 1:
 		i.stack[0].nodeKey.nonce = 1
+		if i.tree.useLegacyFormat {
+			if len(i.stack[0].hash) == 0 {
+				i.stack[0]._hash(i.version)
+			}
+			rootHash = i.stack[0].hash
+		}
 		if err := i.writeNode(i.stack[0]); err != nil {
 			return err
 		}
 		if i.stack[0].nodeKey.version < i.version { // it means there is no update in the given version
-			if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
-				return err
+			if i.tree.useLegacyFormat {
+				if err := i.batch.Set(i.tree.ndb.legacyRootKey(i.version), i.tree.ndb.legacyNodeKey(rootHash)); err != nil {
+					return err
+				}
+			} else {
+				if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
+					return err
+				}
 			}
 		}
 	default:
@@ -219,9 +260,16 @@ func (i *Importer) Commit() error {
 	}
 	i.tree.ndb.resetLatestVersion(i.version)
 
-	_, err = i.tree.LoadVersion(i.version)
-	if err != nil {
-		return err
+	if i.tree.useLegacyFormat && len(rootHash) != 0 {
+		_, err = i.tree.LoadVersionByRootHash(i.version, rootHash)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = i.tree.LoadVersion(i.version)
+		if err != nil {
+			return err
+		}
 	}
 
 	i.Close()

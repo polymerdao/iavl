@@ -90,10 +90,11 @@ type nodeDB struct {
 	legacyLatestVersion int64            // Latest version of nodeDB in legacy format.
 	nodeCache           cache.Cache      // Cache for nodes in the regular tree that consists of key-value pairs at any version.
 	fastNodeCache       cache.Cache      // Cache for nodes in the fast index that represents only key-value pairs at the latest version.
+	useLegacyFormat     bool
 }
 
 func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg log.Logger) *nodeDB {
-	storeVersion, err := db.Get(metadataKeyFormat.Key([]byte(storageVersionKey)))
+	storeVersion, err := db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
 
 	if err != nil || storeVersion == nil {
 		storeVersion = []byte(defaultStorageVersionValue)
@@ -111,6 +112,34 @@ func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg log.Logger) *nodeDB {
 		fastNodeCache:       cache.New(fastNodeCacheSize),
 		versionReaders:      make(map[int64]uint32, 8),
 		storageVersion:      string(storeVersion),
+	}
+}
+
+func newLegacyNodeDB(db dbm.DB, cacheSize int, opts Options, noStoreVersion bool, lg log.Logger) *nodeDB {
+	var storeVersion []byte
+	if noStoreVersion {
+		storeVersion = []byte(defaultStorageVersionValue)
+	} else {
+		var err error
+		storeVersion, err = db.Get(metadataKeyFormat.Key(ibytes.UnsafeStrToBytes(storageVersionKey)))
+		if err != nil || storeVersion == nil {
+			storeVersion = []byte(defaultStorageVersionValue)
+		}
+	}
+
+	return &nodeDB{
+		logger:              lg,
+		db:                  db,
+		batch:               NewBatchWithFlusher(db, opts.FlushThreshold),
+		opts:                opts,
+		firstVersion:        0,
+		latestVersion:       0, // initially invalid
+		legacyLatestVersion: 0,
+		nodeCache:           cache.New(cacheSize),
+		fastNodeCache:       cache.New(fastNodeCacheSize),
+		versionReaders:      make(map[int64]uint32, 8),
+		storageVersion:      string(storeVersion),
+		useLegacyFormat:     true,
 	}
 }
 
@@ -135,9 +164,9 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	ndb.opts.Stat.IncCacheMissCnt()
 
 	// Doesn't exist, load.
-	isLegcyNode := len(nk) == hashSize
+	isLegacyNode := len(nk) == hashSize
 	var nodeKey []byte
-	if isLegcyNode {
+	if isLegacyNode {
 		nodeKey = ndb.legacyNodeKey(nk)
 	} else {
 		nodeKey = ndb.nodeKey(nk)
@@ -151,11 +180,12 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	}
 
 	var node *Node
-	if isLegcyNode {
+	if isLegacyNode {
 		node, err = MakeLegacyNode(nk, buf)
 		if err != nil {
 			return nil, fmt.Errorf("error reading Legacy Node. bytes: %x, error: %v", buf, err)
 		}
+		node.isLegacy = ndb.useLegacyFormat
 	} else {
 		node, err = MakeNode(nk, buf)
 		if err != nil {
@@ -209,7 +239,7 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
 
-	if node.nodeKey == nil {
+	if (!ndb.useLegacyFormat && node.nodeKey == nil) || (ndb.useLegacyFormat && node.hash == nil) {
 		return ErrNodeMissingNodeKey
 	}
 
@@ -217,12 +247,21 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 	var buf bytes.Buffer
 	buf.Grow(node.encodedSize())
 
-	if err := node.writeBytes(&buf); err != nil {
-		return err
-	}
-
-	if err := ndb.batch.Set(ndb.nodeKey(node.GetKey()), buf.Bytes()); err != nil {
-		return err
+	nk := node.GetKey()
+	if len(nk) == hashSize {
+		if err := node.writeLegacyBytes(&buf); err != nil {
+			return err
+		}
+		if err := ndb.batch.Set(ndb.legacyNodeKey(nk), buf.Bytes()); err != nil {
+			return err
+		}
+	} else {
+		if err := node.writeBytes(&buf); err != nil {
+			return err
+		}
+		if err := ndb.batch.Set(ndb.nodeKey(nk), buf.Bytes()); err != nil {
+			return err
+		}
 	}
 
 	ndb.logger.Debug("BATCH SAVE", "node", node)
@@ -291,7 +330,13 @@ func (ndb *nodeDB) shouldForceFastStorageUpgrade() (bool, error) {
 	versions := strings.Split(ndb.storageVersion, fastStorageVersionDelimiter)
 
 	if len(versions) == 2 {
-		latestVersion, err := ndb.getLatestVersion()
+		var latestVersion int64
+		var err error
+		if ndb.useLegacyFormat {
+			latestVersion, err = ndb.getLegacyLatestVersion()
+		} else {
+			latestVersion, err = ndb.getLatestVersion()
+		}
 		if err != nil {
 			// TODO: should be true or false as default? (removed panic here)
 			return false, err
@@ -328,6 +373,9 @@ func (ndb *nodeDB) saveFastNodeUnlocked(node *fastnode.Node, shouldAddToCache bo
 
 // Has checks if a node key exists in the database.
 func (ndb *nodeDB) Has(nk []byte) (bool, error) {
+	if len(nk) == hashSize {
+		return ndb.db.Has(ndb.legacyNodeKey(nk))
+	}
 	return ndb.db.Has(ndb.nodeKey(nk))
 }
 
@@ -395,6 +443,74 @@ func (ndb *nodeDB) deleteVersion(version int64) error {
 	return nil
 }
 
+func (ndb *nodeDB) getPreviousVersion(version int64) (int64, error) {
+	itr, err := ndb.db.ReverseIterator(
+		legacyRootKeyFormat.Key(1),
+		legacyRootKeyFormat.Key(version),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer itr.Close()
+
+	pversion := int64(-1)
+	for ; itr.Valid(); itr.Next() {
+
+		k := itr.Key()
+		legacyRootKeyFormat.Scan(k, &pversion)
+		return pversion, nil
+	}
+
+	if err := itr.Error(); err != nil {
+		return 0, err
+	}
+
+	return 0, nil
+}
+
+func (ndb *nodeDB) deleteLegacyOrphans(version int64) error {
+	ndb.mtx.Lock()
+	defer ndb.mtx.Unlock()
+	// Will be zero if there is no previous version.
+	predecessor, err := ndb.getPreviousVersion(version)
+	if err != nil {
+		return err
+	}
+
+	// Traverse orphans with a lifetime ending at the version specified.
+	// TODO optimize.
+	return ndb.traverseOrphansVersion(version, func(key, hash []byte) error {
+		var fromVersion, toVersion int64
+
+		// See comment on `orphanKeyFmt`. Note that here, `version` and
+		// `toVersion` are always equal.
+		legacyOrphanKeyFormat.Scan(key, &toVersion, &fromVersion)
+
+		// Delete orphan key and reverse-lookup key.
+		if err := ndb.batch.Delete(key); err != nil {
+			return err
+		}
+
+		// If there is no predecessor, or the predecessor is earlier than the
+		// beginning of the lifetime (ie: negative lifetime), or the lifetime
+		// spans a single version and that version is the one being deleted, we
+		// can delete the orphan.  Otherwise, we shorten its lifetime, by
+		// moving its endpoint to the previous version.
+		if predecessor < fromVersion || fromVersion == toVersion {
+			if err := ndb.batch.Delete(ndb.legacyNodeKey(hash)); err != nil {
+				return err
+			}
+			ndb.nodeCache.Remove(hash)
+		} else {
+			err := ndb.saveOrphan(hash, fromVersion, predecessor)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // deleteLegacyNodes deletes all legacy nodes with the given version from disk.
 // NOTE: This is only used for DeleteVersionsFrom.
 func (ndb *nodeDB) deleteLegacyNodes(version int64, nk []byte) error {
@@ -458,8 +574,68 @@ func (ndb *nodeDB) deleteLegacyVersions(legacyLatestVersion int64) error {
 	return nil
 }
 
+// deleteLegacyVersion deletes a legacy tree version from disk.
+// calls deleteOrphans(version), deleteRoot(version, checkLatestVersion)
+func (ndb *nodeDB) deleteLegacyVersion(version int64, checkLatestVersion bool) error {
+	// TODO: HERE
+	if ndb.versionReaders[version] > 0 {
+		return fmt.Errorf("unable to delete version %v, it has %v active readers", version, ndb.versionReaders[version])
+	}
+
+	err := ndb.deleteLegacyOrphans(version)
+	if err != nil {
+		return err
+	}
+
+	err = ndb.deleteLegacyRoot(version, checkLatestVersion)
+	if err != nil {
+		return err
+	}
+	return err
+}
+
 // DeleteVersionsFrom permanently deletes all tree versions from the given version upwards.
 func (ndb *nodeDB) DeleteVersionsFrom(fromVersion int64) error {
+	if ndb.useLegacyFormat {
+		latest, err := ndb.getLegacyLatestVersion()
+		if err != nil {
+			return err
+		}
+		if latest < fromVersion {
+			return nil
+		}
+
+		ndb.mtx.Lock()
+		for v, r := range ndb.versionReaders {
+			if v >= fromVersion && r != 0 {
+				ndb.mtx.Unlock() // Unlock before exiting
+				return fmt.Errorf("unable to delete version %v with %v active readers", v, r)
+			}
+		}
+		ndb.mtx.Unlock()
+		// TODO: HERE
+		// Delete the nodes for new format
+		if err := ndb.traverseRange(legacyRootKeyFormat.Key(fromVersion), legacyRootKeyFormat.Key(latest+1), func(k, v []byte) error {
+			var version int64
+			legacyRootKeyFormat.Scan(k, &version)
+			// delete the legacy nodes
+			if err := ndb.deleteLegacyNodes(version, v); err != nil {
+				return err
+			}
+			if err := ndb.deleteLegacyOrphans(version); err != nil {
+				return err
+			}
+			// it will skip the orphans because orphans will be removed at once in `deleteLegacyVersions`
+			// delete the legacy root
+			return ndb.batch.Delete(k)
+		}); err != nil {
+			return err
+		}
+
+		ndb.resetLegacyLatestVersion(fromVersion - 1)
+
+		return nil
+	}
 	latest, err := ndb.getLatestVersion()
 	if err != nil {
 		return err
@@ -518,6 +694,39 @@ func (ndb *nodeDB) DeleteVersionsFrom(fromVersion int64) error {
 
 // DeleteVersionsTo deletes the oldest versions up to the given version from disk.
 func (ndb *nodeDB) DeleteVersionsTo(toVersion int64) error {
+	if ndb.useLegacyFormat {
+		legacyLatestVersion, err := ndb.getLegacyLatestVersion()
+		if err != nil {
+			return err
+		}
+
+		first, err := ndb.getFirstLegacyVersion()
+		if err != nil {
+			return err
+		}
+
+		if legacyLatestVersion <= toVersion {
+			return fmt.Errorf("latest version %d is less than or equal to toVersion %d", legacyLatestVersion, toVersion)
+		}
+
+		ndb.mtx.Lock()
+		for v, r := range ndb.versionReaders {
+			if v >= first && v <= toVersion && r != 0 {
+				ndb.mtx.Unlock()
+				return fmt.Errorf("unable to delete version %d with %d active readers", v, r)
+			}
+		}
+		ndb.mtx.Unlock()
+
+		for version := first; version <= toVersion; version++ {
+			if err := ndb.deleteLegacyVersion(version, true); err != nil {
+				return err
+			}
+			ndb.resetFirstVersion(version + 1)
+		}
+
+		return nil
+	}
 	legacyLatestVersion, err := ndb.getLegacyLatestVersion()
 	if err != nil {
 		return err
@@ -598,6 +807,10 @@ func (ndb *nodeDB) fastNodeKey(key []byte) []byte {
 	return fastKeyFormat.KeyBytes(key)
 }
 
+func (ndb *nodeDB) legacyOrphanKey(fromVersion, toVersion int64, hash []byte) []byte {
+	return legacyOrphanKeyFormat.Key(toVersion, fromVersion, hash)
+}
+
 func (ndb *nodeDB) legacyNodeKey(nk []byte) []byte {
 	return legacyNodeKeyFormat.Key(nk)
 }
@@ -649,6 +862,55 @@ func (ndb *nodeDB) getFirstVersion() (int64, error) {
 	return latestVersion, nil
 }
 
+func (ndb *nodeDB) getFirstLegacyVersion() (int64, error) {
+	ndb.mtx.Lock()
+	firstVersion := ndb.firstVersion
+	ndb.mtx.Unlock()
+
+	if firstVersion > 0 {
+		return firstVersion, nil
+	}
+
+	// Find the first version
+	latestVersion, err := ndb.getLegacyLatestVersion()
+	if err != nil {
+		return 0, err
+	}
+	for firstVersion < latestVersion {
+		version := (latestVersion + firstVersion) >> 1
+		has, err := ndb.hasLegacyVersion(version)
+		if err != nil {
+			return 0, err
+		}
+		if has {
+			latestVersion = version
+		} else {
+			firstVersion = version + 1
+		}
+	}
+
+	ndb.resetFirstVersion(latestVersion)
+
+	return latestVersion, nil
+}
+
+// deleteRoot deletes the root entry from disk, but not the node it points to.
+func (ndb *nodeDB) deleteLegacyRoot(version int64, checkLatestVersion bool) error {
+	latestVersion, err := ndb.getLegacyLatestVersion()
+	if err != nil {
+		return err
+	}
+
+	if checkLatestVersion && version == latestVersion {
+		return errors.New("tried to delete latest version")
+	}
+	if err := ndb.batch.Delete(ndb.legacyRootKey(version)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (ndb *nodeDB) resetFirstVersion(version int64) {
 	ndb.mtx.Lock()
 	defer ndb.mtx.Unlock()
@@ -659,7 +921,6 @@ func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 	ndb.mtx.Lock()
 	latestVersion := ndb.legacyLatestVersion
 	ndb.mtx.Unlock()
-
 	if latestVersion != 0 {
 		return latestVersion, nil
 	}
@@ -685,10 +946,13 @@ func (ndb *nodeDB) getLegacyLatestVersion() (int64, error) {
 		return 0, err
 	}
 
-	// If there are no legacy versions, set -1
-	ndb.resetLegacyLatestVersion(-1)
+	// If not operating in legacyMode and there are no legacy versions, set -1
+	if !ndb.useLegacyFormat {
+		ndb.resetLegacyLatestVersion(-1)
+		return -1, nil
+	}
 
-	return -1, nil
+	return latestVersion, nil
 }
 
 func (ndb *nodeDB) resetLegacyLatestVersion(version int64) {
@@ -828,13 +1092,36 @@ func (ndb *nodeDB) SaveRoot(version int64, nk *NodeKey) error {
 	return ndb.batch.Set(nodeKeyFormat.Key(GetRootKey(version)), nodeKeyFormat.Key(nk.GetKey()))
 }
 
+// SaveLegacyRoot saves the root when no updates.
+func (ndb *nodeDB) SaveLegacyRoot(version int64, key []byte) error {
+	ndb.mtx.Lock()
+	defer ndb.mtx.Unlock()
+	return ndb.batch.Set(ndb.legacyRootKey(version), key)
+}
+
+// Saves a single orphan to disk.
+func (ndb *nodeDB) saveOrphan(hash []byte, fromVersion, toVersion int64) error {
+	if fromVersion > toVersion {
+		return fmt.Errorf("orphan expires before it comes alive.  %d > %d", fromVersion, toVersion)
+	}
+	key := ndb.legacyOrphanKey(fromVersion, toVersion, hash)
+	if err := ndb.batch.Set(key, hash); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Traverse fast nodes and return error if any, nil otherwise
 func (ndb *nodeDB) traverseFastNodes(fn func(k, v []byte) error) error {
 	return ndb.traversePrefix(fastKeyFormat.Key(), fn)
 }
 
-// Traverse all keys and return error if any, nil otherwise
+// Traverse orphans ending at a certain version. return error if any, nil otherwise
+func (ndb *nodeDB) traverseOrphansVersion(version int64, fn func(k, v []byte) error) error {
+	return ndb.traversePrefix(legacyOrphanKeyFormat.Key(version), fn)
+}
 
+// Traverse all keys and return error if any, nil otherwise
 func (ndb *nodeDB) traverse(fn func(key, value []byte) error) error {
 	return ndb.traverseRange(nil, nil, fn)
 }
@@ -1105,11 +1392,20 @@ func (ndb *nodeDB) size() int {
 func (ndb *nodeDB) traverseNodes(fn func(node *Node) error) error {
 	nodes := []*Node{}
 
-	if err := ndb.traversePrefix(nodeKeyFormat.Prefix(), func(key, value []byte) error {
+	var prefix []byte
+	var nodeMaker func(hash, buf []byte) (*Node, error)
+	if ndb.useLegacyFormat {
+		prefix = legacyNodeKeyFormat.Prefix()
+		nodeMaker = MakeLegacyNode
+	} else {
+		prefix = nodeKeyFormat.Prefix()
+		nodeMaker = MakeNode
+	}
+	if err := ndb.traversePrefix(prefix, func(key, value []byte) error {
 		if isRef, _ := isReferenceRoot(value); isRef {
 			return nil
 		}
-		node, err := MakeNode(key[1:], value)
+		node, err := nodeMaker(key[1:], value)
 		if err != nil {
 			return err
 		}
