@@ -427,13 +427,13 @@ func TestLegacyMutableTree_DeleteVersionsTo(t *testing.T) {
 
 	// ensure even versions have been deleted
 	for v := int64(1); v <= versionToDelete; v++ {
-		_, err := tree.LoadVersion(v)
+		_, err := tree.LoadLegacyVersion(v)
 		require.Error(t, err)
 	}
 
 	// ensure odd number versions exist and we can query for all set entries
 	for _, v := range []int64{9, 10} {
-		_, err := tree.LoadVersion(v)
+		_, err := tree.LoadLegacyVersion(v)
 		require.NoError(t, err)
 
 		for _, e := range versionEntries[v] {
@@ -1623,7 +1623,7 @@ func TestLegacyUpgradeStorageToFast_DbErrorEnableFastStorage_Failure(t *testing.
 
 	// rIterMock is used to get the latest version from disk. We are mocking that rIterMock returns latestTreeVersion from disk
 	rIterMock.EXPECT().Valid().Return(true).Times(1)
-	rIterMock.EXPECT().Key().Return(nodeKeyFormat.Key(GetRootKey(1)))
+	rIterMock.EXPECT().Key().Return(legacyRootKeyFormat.Key(1))
 	rIterMock.EXPECT().Close().Return(nil).Times(1)
 
 	expectedError := errors.New("some db error")
@@ -1720,7 +1720,7 @@ func TestLegacyFastStorageReUpgradeProtection_NoForceUpgrade_Success(t *testing.
 
 	// rIterMock is used to get the latest version from disk. We are mocking that rIterMock returns latestTreeVersion from disk
 	rIterMock.EXPECT().Valid().Return(true).Times(1)
-	rIterMock.EXPECT().Key().Return(nodeKeyFormat.Key(GetRootKey(1)))
+	rIterMock.EXPECT().Key().Return(legacyRootKeyFormat.Key(1))
 	rIterMock.EXPECT().Close().Return(nil).Times(1)
 
 	batchMock := mock.NewMockBatch(ctrl)
@@ -1734,7 +1734,7 @@ func TestLegacyFastStorageReUpgradeProtection_NoForceUpgrade_Success(t *testing.
 
 	// Pretend that we called Load and have the latest state in the tree
 	tree.version = latestTreeVersion
-	latestVersion, err := tree.ndb.getLatestVersion()
+	latestVersion, err := tree.ndb.getLegacyLatestVersion()
 	require.NoError(t, err)
 	require.Equal(t, latestVersion, int64(latestTreeVersion))
 
@@ -1883,7 +1883,7 @@ func TestLegacyFastStorageReUpgradeProtection_ForceUpgradeFirstTime_NoForceSecon
 
 	// rIterMock is used to get the latest version from disk. We are mocking that rIterMock returns latestTreeVersion from disk
 	rIterMock.EXPECT().Valid().Return(true).Times(1)
-	rIterMock.EXPECT().Key().Return(nodeKeyFormat.Key(GetRootKey(latestTreeVersion)))
+	rIterMock.EXPECT().Key().Return(legacyRootKeyFormat.Key(latestTreeVersion))
 	rIterMock.EXPECT().Close().Return(nil).Times(1)
 
 	fastNodeKeyToDelete := []byte("some_key")
@@ -1928,7 +1928,7 @@ func TestLegacyFastStorageReUpgradeProtection_ForceUpgradeFirstTime_NoForceSecon
 
 	// Pretend that we called Load and have the latest state in the tree
 	tree.version = latestTreeVersion
-	latestVersion, err := tree.ndb.getLatestVersion()
+	latestVersion, err := tree.ndb.getLegacyLatestVersion()
 	require.NoError(t, err)
 	require.Equal(t, latestVersion, int64(latestTreeVersion))
 

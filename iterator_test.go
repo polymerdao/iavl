@@ -355,7 +355,7 @@ func TestLegacyIterator_WithDelete_Full_Ascending_Success(t *testing.T) {
 	err = tree.DeleteVersionsTo(1)
 	require.NoError(t, err)
 
-	latestVersion, err := tree.ndb.getLatestVersion()
+	latestVersion, err := tree.ndb.getLegacyLatestVersion()
 	require.NoError(t, err)
 	immutableTree, err := tree.GetImmutable(latestVersion)
 	require.NoError(t, err)

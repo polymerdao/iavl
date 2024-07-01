@@ -415,8 +415,8 @@ func TestShouldForceFastStorageUpdate_FastVersion_Match_False(t *testing.T) {
 func TestLegacyShouldForceFastStorageUpdate_FastVersion_Match_False(t *testing.T) {
 	db := dbm.NewMemDB()
 	ndb := newLegacyNodeDB(db, 0, DefaultOptions(), false, log.NewNopLogger())
-	ndb.latestVersion = 100
-	ndb.storageVersion = fastStorageVersionValue + fastStorageVersionDelimiter + strconv.Itoa(int(ndb.latestVersion))
+	ndb.legacyLatestVersion = 100
+	ndb.storageVersion = fastStorageVersionValue + fastStorageVersionDelimiter + strconv.Itoa(int(ndb.legacyLatestVersion))
 
 	shouldForce, err := ndb.shouldForceFastStorageUpgrade()
 	require.False(t, shouldForce)
@@ -435,8 +435,8 @@ func TestIsFastStorageEnabled_True(t *testing.T) {
 func TestLegacyIsFastStorageEnabled_True(t *testing.T) {
 	db := dbm.NewMemDB()
 	ndb := newLegacyNodeDB(db, 0, DefaultOptions(), false, log.NewNopLogger())
-	ndb.latestVersion = 100
-	ndb.storageVersion = fastStorageVersionValue + fastStorageVersionDelimiter + strconv.Itoa(int(ndb.latestVersion))
+	ndb.legacyLatestVersion = 100
+	ndb.storageVersion = fastStorageVersionValue + fastStorageVersionDelimiter + strconv.Itoa(int(ndb.legacyLatestVersion))
 
 	require.True(t, ndb.hasUpgradedToFastStorage())
 }
@@ -455,7 +455,7 @@ func TestIsFastStorageEnabled_False(t *testing.T) {
 func TestLegacyIsFastStorageEnabled_False(t *testing.T) {
 	db := dbm.NewMemDB()
 	ndb := newLegacyNodeDB(db, 0, DefaultOptions(), false, log.NewNopLogger())
-	ndb.latestVersion = 100
+	ndb.legacyLatestVersion = 100
 	ndb.storageVersion = defaultStorageVersionValue
 
 	shouldForce, err := ndb.shouldForceFastStorageUpgrade()
